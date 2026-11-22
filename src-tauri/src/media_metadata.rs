@@ -76,6 +76,7 @@ pub async fn inspect_local_movie(file_path: String) -> Result<MovieFileInfo, Str
     Ok(MovieFileInfo {
         movie_id,
         filename,
+        file_path: Some(file_path),
         file_size,
         duration: 0.0,
         container_format,
@@ -224,6 +225,7 @@ mod tests {
         let host = MovieFileInfo {
             movie_id: "m1".to_string(),
             filename: "Endgame.mkv".to_string(),
+            file_path: None,
             file_size: 1_000_000,
             duration: 10800.0,
             container_format: "MKV".to_string(),
@@ -244,6 +246,7 @@ mod tests {
         let host = MovieFileInfo {
             movie_id: "m1".to_string(),
             filename: "Avengers.mkv".to_string(),
+            file_path: None,
             file_size: 4_000_000_000,
             duration: 10800.0,
             container_format: "MKV".to_string(),
@@ -255,6 +258,7 @@ mod tests {
         let local = MovieFileInfo {
             movie_id: "m2".to_string(),
             filename: "Avengers.mkv".to_string(),
+            file_path: None,
             file_size: 4_000_000_000,
             duration: 10800.0,
             container_format: "MKV".to_string(),
@@ -275,6 +279,7 @@ mod tests {
         let host = MovieFileInfo {
             movie_id: "m1".to_string(),
             filename: "Avengers.mkv".to_string(),
+            file_path: None,
             file_size: 4_000_000_000,
             duration: 10800.0,
             container_format: "MKV".to_string(),
@@ -286,6 +291,7 @@ mod tests {
         let local = MovieFileInfo {
             movie_id: "m2".to_string(),
             filename: "Avengers.mkv".to_string(),
+            file_path: None,
             file_size: 3_800_000_000,
             duration: 10800.0,
             container_format: "MKV".to_string(),
@@ -311,6 +317,7 @@ mod tests {
         let host = MovieFileInfo {
             movie_id: "m1".to_string(),
             filename: "Movie.mp4".to_string(),
+            file_path: None,
             file_size: 1_000_000_000,
             duration: 7200.0,
             container_format: "MP4".to_string(),
@@ -322,6 +329,7 @@ mod tests {
         let local = MovieFileInfo {
             movie_id: "m2".to_string(),
             filename: "Movie.mp4".to_string(),
+            file_path: None,
             file_size: 1_000_000_000,
             duration: 5400.0, // Differ by 30 mins!
             container_format: "MP4".to_string(),

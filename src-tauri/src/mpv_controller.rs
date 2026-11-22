@@ -16,7 +16,7 @@ use tauri::{AppHandle, Emitter};
 use tokio::io::{AsyncBufReadExt, AsyncWriteExt, BufReader};
 use tokio::net::windows::named_pipe::{ClientOptions, NamedPipeClient};
 use tokio::process::Command;
-use tokio::sync::RwLock;
+use tokio::sync::{broadcast, RwLock};
 use uuid::Uuid;
 
 pub const SIDECAR_NAME: &str = "mpv";
@@ -66,10 +66,12 @@ pub struct MpvController {
     pub ipc_writer: Arc<RwLock<Option<tokio::io::WriteHalf<NamedPipeClient>>>>,
     pub pipe_name: Arc<RwLock<Option<String>>>,
     pub is_stopping: Arc<AtomicBool>,
+    pub property_tx: broadcast::Sender<(String, serde_json::Value)>,
 }
 
 impl MpvController {
     pub fn new() -> Self {
+        let (property_tx, _) = broadcast::channel(128);
         Self {
             app_handle: Arc::new(std::sync::RwLock::new(None)),
             status: Arc::new(RwLock::new(MpvPlaybackStatus::default())),
@@ -77,7 +79,12 @@ impl MpvController {
             ipc_writer: Arc::new(RwLock::new(None)),
             pipe_name: Arc::new(RwLock::new(None)),
             is_stopping: Arc::new(AtomicBool::new(false)),
+            property_tx,
         }
+    }
+
+    pub fn subscribe_properties(&self) -> broadcast::Receiver<(String, serde_json::Value)> {
+        self.property_tx.subscribe()
     }
 
     pub fn set_app_handle(&self, handle: AppHandle) {
@@ -169,6 +176,26 @@ impl MpvController {
 
     /// Launches mpv sidecar and connects to its named pipe JSON IPC server
     pub async fn launch(&self, initial_file: Option<String>) -> Result<(), String> {
+        // If mpv is already running and connected to IPC, load file directly instead of killing and recreating process
+        {
+            let cp_lock = self.child_process.read().await;
+            let writer_lock = self.ipc_writer.read().await;
+            if cp_lock.is_some() && writer_lock.is_some() {
+                drop(cp_lock);
+                drop(writer_lock);
+                if let Some(ref file_path) = initial_file {
+                    self.send_command(vec![
+                        serde_json::Value::String("loadfile".into()),
+                        serde_json::Value::String(file_path.clone().into()),
+                        serde_json::Value::String("replace".into()),
+                    ])
+                    .await?;
+                    let _ = self.pause().await;
+                }
+                return Ok(());
+            }
+        }
+
         // Clean up any previously running instance
         self.stop().await?;
         self.is_stopping.store(false, Ordering::SeqCst);
@@ -193,12 +220,13 @@ impl MpvController {
             *p = Some(pipe_path.clone());
         }
 
-        // Configure mpv command line arguments
+        // Configure mpv command line arguments (start paused to prevent unauthorized playback from 00:00)
         let mut cmd = Command::new(&mpv_binary);
         cmd.arg("--idle=yes")
             .arg(format!("--input-ipc-server={}", pipe_path))
             .arg("--force-window=immediate")
             .arg("--keep-open=yes")
+            .arg("--pause=yes")
             .arg("--hr-seek=yes")
             .arg("--hr-seek-framedrop=no")
             .arg("--title=SyncDrop Movie Player")
@@ -304,6 +332,7 @@ impl MpvController {
         let app_handle_arc = Arc::clone(&self.app_handle);
         let child_arc = Arc::clone(&self.child_process);
         let stopping_arc = Arc::clone(&self.is_stopping);
+        let property_tx_clone = self.property_tx.clone();
 
         tauri::async_runtime::spawn(async move {
             let mut reader = BufReader::new(read_half).lines();
@@ -371,6 +400,9 @@ impl MpvController {
                             }
                             _ => {}
                         }
+
+                        // Notify internal subscribers (e.g. SyncRoomManager for instant spacebar detection)
+                        let _ = property_tx_clone.send((prop.to_string(), data.cloned().unwrap_or(serde_json::Value::Null)));
 
                         // Broadcast update
                         if let Ok(lock) = app_handle_arc.read() {
@@ -483,13 +515,15 @@ impl MpvController {
         .await
     }
 
-    /// Loads a movie file into the running player
+    /// Loads a movie file into the running player in paused state
     pub async fn load_file(&self, file_path: &str) -> Result<(), String> {
-        // If mpv is not running yet, launch it with this file
+        // If mpv is not running yet, launch it with this file (launch already enforces --pause=yes)
         {
             let cp = self.child_process.read().await;
-            if cp.is_none() {
+            let writer = self.ipc_writer.read().await;
+            if cp.is_none() || writer.is_none() {
                 drop(cp);
+                drop(writer);
                 return self.launch(Some(file_path.to_string())).await;
             }
         }
@@ -500,6 +534,9 @@ impl MpvController {
             serde_json::Value::String("replace".into()),
         ])
         .await?;
+
+        // Keep player paused upon loading to prevent automatic playback before room synchronization
+        let _ = self.pause().await;
 
         let mut st = self.status.write().await;
         st.filename = Path::new(file_path)

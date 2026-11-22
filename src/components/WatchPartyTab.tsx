@@ -223,21 +223,19 @@ export const WatchPartyTab: React.FC<WatchPartyTabProps> = ({
     try {
       // 1. Asynchronously read metadata & calculate SHA-256 via worker pool
       const inspected = await inspectMovieFile(filePath);
-      onSelectMovie(inspected);
+      inspected.filePath = filePath;
+      await onSelectMovie(inspected);
 
-      // 2. Launch or load into mpv sidecar engine
-      onLaunchPlayer(filePath);
-
-      // 3. Query backend verification evaluator
+      // 2. Query backend verification evaluator
       const res = await getMovieVerification();
       setVerificationResult(res);
 
-      // 4. If participant in room, request fresh snapshot to sync
-      if (onSyncRoom && isInRoom && !roomState?.isHost) {
-        setTimeout(() => {
-          onSyncRoom();
-        }, 300);
+      // 3. For host or standalone player mode, launch player with file
+      if (!isInRoom || roomState?.isHost) {
+        await onLaunchPlayer(filePath);
       }
+      // Note: for room participants, setLocalWatchMovie (dispatched by onSelectMovie)
+      // automatically loads the file into mpv in PAUSED state and catches up to the host!
     } catch (err) {
       console.error("Failed to inspect and load movie:", err);
     } finally {
@@ -256,9 +254,13 @@ export const WatchPartyTab: React.FC<WatchPartyTabProps> = ({
     setIsUpdatingCompatibility(true);
     try {
       const res = await setCompatibilityMode(approve);
-      setVerificationResult(res);
+      if (res) {
+        setVerificationResult(res);
+      }
       if (approve && onSyncRoom && isInRoom && !roomState?.isHost) {
-        onSyncRoom();
+        setTimeout(() => {
+          onSyncRoom();
+        }, 400);
       }
     } catch (err) {
       console.warn("Failed to set compatibility mode:", err);

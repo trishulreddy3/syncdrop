@@ -401,9 +401,27 @@ async fn get_movie_verification(
 async fn set_compatibility_mode(
     approved: bool,
     room_manager: State<'_, Arc<SyncRoomManager>>,
-) -> Result<(), String> {
+) -> Result<media_metadata::MovieVerificationResult, String> {
     room_manager.compatibility_approved.store(approved, std::sync::atomic::Ordering::SeqCst);
-    Ok(())
+
+    // If client is in a room and has local movie, re-execute set_local_movie to trigger late-join loading & catch up!
+    if approved {
+        let local_m = room_manager.local_movie.read().await.clone();
+        if let Some(lm) = local_m {
+            let manager_clone = Arc::clone(&room_manager);
+            tauri::async_runtime::spawn(async move {
+                manager_clone.set_local_movie(lm).await;
+            });
+        }
+    }
+
+    let host_m = room_manager.current_movie.read().await;
+    let local_m = room_manager.local_movie.read().await;
+    Ok(media_metadata::evaluate_movie_verification(
+        host_m.as_ref(),
+        local_m.as_ref(),
+        approved,
+    ))
 }
 
 #[cfg_attr(mobile, tauri::mobile_entry_point)]

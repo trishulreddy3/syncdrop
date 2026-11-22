@@ -113,6 +113,7 @@ export type ParticipantSyncState =
 export interface MovieFileInfo {
   movieId: string;
   filename: string;
+  filePath?: string;
   fileSize: number;
   duration: number; // seconds
   containerFormat: string;

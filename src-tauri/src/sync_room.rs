@@ -172,6 +172,8 @@ pub struct RoomMember {
 pub struct MovieFileInfo {
     pub movie_id: String,
     pub filename: String,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub file_path: Option<String>,
     pub file_size: u64,
     pub duration: f64,
     pub container_format: String,
@@ -290,7 +292,19 @@ pub fn normalize_filename(name: &str) -> String {
 pub fn check_movie_compatibility(
     host_file: &MovieFileInfo,
     local_file: &MovieFileInfo,
+    compatibility_approved: bool,
 ) -> (bool, String) {
+    if compatibility_approved {
+        return (true, "Compatibility mode approved by user".to_string());
+    }
+
+    // Exact SHA-256 match
+    if let (Some(ref h_hash), Some(ref l_hash)) = (&host_file.sha256, &local_file.sha256) {
+        if h_hash.eq_ignore_ascii_case(l_hash) {
+            return (true, "Movie verified (Exact SHA-256 Match)".to_string());
+        }
+    }
+
     let host_norm = normalize_filename(&host_file.filename);
     let local_norm = normalize_filename(&local_file.filename);
 
@@ -309,7 +323,7 @@ pub fn check_movie_compatibility(
         (
             false,
             format!(
-                "Size mismatch: Host is {} MB, local is {} MB. Do not treat as identical.",
+                "Size mismatch: Host is {} MB, local is {} MB. Approve compatibility to play anyway.",
                 host_mb, local_mb
             ),
         )
@@ -317,7 +331,7 @@ pub fn check_movie_compatibility(
         (
             false,
             format!(
-                "Different file: Host is watching '{}' ({:.1} MB)",
+                "Different file: Host is watching '{}' ({:.1} MB). Approve compatibility or receive via Wi-Fi Send.",
                 host_file.filename,
                 (host_file.file_size as f64) / (1024.0 * 1024.0)
             ),
@@ -564,6 +578,33 @@ impl SyncRoomManager {
             }
         });
 
+        // Immediate Host MPV Property Listener (Host pressed Space or paused in MPV directly)
+        let is_hosting_prop = Arc::clone(&self_arc.is_hosting);
+        let manager_prop = Arc::clone(&self_arc);
+        let mut prop_rx = self_arc.mpv_controller.subscribe_properties();
+        tauri::async_runtime::spawn(async move {
+            while let Ok((prop, val)) = prop_rx.recv().await {
+                if !is_hosting_prop.load(Ordering::Relaxed) {
+                    break;
+                }
+                if prop == "pause" {
+                    if let Some(is_paused) = val.as_bool() {
+                        let mpv_st = manager_prop.mpv_controller.get_current_status().await;
+                        let host_info = manager_prop.discovery_state.get_local_info().await;
+                        let intended_spd = f64::from_bits(manager_prop.intended_speed.load(Ordering::Relaxed));
+                        manager_prop
+                            .broadcast_state_sync(
+                                mpv_st.time_pos,
+                                is_paused,
+                                if intended_spd > 0.0 { intended_spd } else { mpv_st.speed },
+                                host_info.alias,
+                            )
+                            .await;
+                    }
+                }
+            }
+        });
+
         // Broadcast room discovery advertisement
         let host_info = self_arc.discovery_state.get_local_info().await;
         let room_title = if title.is_empty() { format!("{}'s Watch Party", host_info.alias) } else { title };
@@ -745,12 +786,13 @@ impl SyncRoomManager {
                     position + (latency_secs * speed)
                 };
 
-                // 4. Initial movie compatibility check (Filename and size - Section 3.3)
+                // 4. Initial movie compatibility check (Filename, size, SHA-256, and compatibility mode)
+                let approved = self.compatibility_approved.load(Ordering::Relaxed);
                 let (movie_matched, _compat_msg) = {
                     let host_movie = self.current_movie.read().await;
                     let local_movie = self.local_movie.read().await;
                     match (&*host_movie, &*local_movie) {
-                        (Some(hm), Some(lm)) => check_movie_compatibility(hm, lm),
+                        (Some(hm), Some(lm)) => check_movie_compatibility(hm, lm, approved),
                         (Some(_), None) => (false, "Please select local movie file".to_string()),
                         (None, _) => (true, "No host movie specified".to_string()),
                     }
@@ -761,9 +803,10 @@ impl SyncRoomManager {
                 let local_pos = mpv_st.time_pos;
                 let drift = local_pos - expected_position;
 
-                // 6. Handle play/pause state synchronization
+                // 6. Handle play/pause state synchronization (Host is authoritative!)
                 if mpv_st.pause != paused {
                     if paused {
+                        // Host paused/stopped: ALWAYS enforce pause on participant!
                         let _ = self.mpv_controller.pause().await;
                     } else if movie_matched {
                         let _ = self.mpv_controller.play().await;
@@ -892,6 +935,7 @@ impl SyncRoomManager {
                 let info = MovieFileInfo {
                     movie_id,
                     filename,
+                    file_path: None,
                     file_size,
                     duration,
                     container_format,
@@ -906,10 +950,11 @@ impl SyncRoomManager {
                     *cm = Some(info.clone());
                 }
 
+                let approved = self.compatibility_approved.load(Ordering::Relaxed);
                 let (matched, compat_msg) = {
                     let lm = self.local_movie.read().await;
                     match &*lm {
-                        Some(local) => check_movie_compatibility(&info, local),
+                        Some(local) => check_movie_compatibility(&info, local, approved),
                         None => (false, "Please select local movie file".to_string()),
                     }
                 };
@@ -917,6 +962,10 @@ impl SyncRoomManager {
                 println!("Host movie received: {} ({} bytes). Matched: {} ({})", info.filename, info.file_size, matched, compat_msg);
 
                 self.emit_event("syncdrop://room-file-info", &info);
+
+                if matched && self.local_movie.read().await.is_some() {
+                    self.request_sync().await;
+                }
 
                 let local_info = self.discovery_state.get_local_info().await;
                 let report = SyncMessage::StatusReport {
@@ -1379,11 +1428,12 @@ impl SyncRoomManager {
         let local_info = self.discovery_state.get_local_info().await;
 
         let intended_spd = f64::from_bits(self.intended_speed.load(Ordering::Relaxed));
+        let approved = self.compatibility_approved.load(Ordering::Relaxed);
         let (movie_matched, _) = {
             let host_movie = self.current_movie.read().await;
             let local_movie = self.local_movie.read().await;
             match (&*host_movie, &*local_movie) {
-                (Some(hm), Some(lm)) => check_movie_compatibility(hm, lm),
+                (Some(hm), Some(lm)) => check_movie_compatibility(hm, lm, approved),
                 (Some(_), None) => (false, "Please select local movie".to_string()),
                 (None, _) => (true, "No host movie specified".to_string()),
             }
@@ -1456,8 +1506,9 @@ impl SyncRoomManager {
             let host_movie = self.current_movie.read().await.clone();
 
             // 1. Verify movie against host's FILE_INFO if present
+            let approved = self.compatibility_approved.load(Ordering::Relaxed);
             if let Some(ref hm) = host_movie {
-                let (compat, compat_msg) = check_movie_compatibility(hm, &info);
+                let (compat, compat_msg) = check_movie_compatibility(hm, &info, approved);
                 if !compat {
                     eprintln!("Late join movie verification warning: {}", compat_msg);
                     self.send_client_message(SyncMessage::StatusReport {
@@ -1481,8 +1532,9 @@ impl SyncRoomManager {
             }).await;
 
             // 3. Launch mpv and load file in PAUSED state (prevent starting from 00:00 - Requirement 11)
+            let path_to_load = info.file_path.as_deref().unwrap_or(&info.filename);
             let _ = self.mpv_controller.pause().await;
-            if let Err(e) = self.mpv_controller.load_file(&info.filename).await {
+            if let Err(e) = self.mpv_controller.load_file(path_to_load).await {
                 eprintln!("Failed to load local movie into mpv: {}", e);
                 self.send_client_message(SyncMessage::StatusReport {
                     client_id: local_info.id.clone(),
@@ -2016,6 +2068,7 @@ mod tests {
         let host_movie = MovieFileInfo {
             movie_id: "endgame-123".to_string(),
             filename: "Avengers Endgame (2019) 1080p.mkv".to_string(),
+            file_path: None,
             file_size: 4_000_000_000,
             duration: 10800.0,
             container_format: "MKV".to_string(),
@@ -2028,6 +2081,7 @@ mod tests {
         let compatible_local = MovieFileInfo {
             movie_id: "local-456".to_string(),
             filename: "Avengers Endgame (2019) 1080p.mkv".to_string(),
+            file_path: None,
             file_size: 4_000_000_000,
             duration: 10800.0,
             container_format: "MKV".to_string(),
@@ -2040,6 +2094,7 @@ mod tests {
         let incompatible_local = MovieFileInfo {
             movie_id: "local-789".to_string(),
             filename: "Inception 1080p.mkv".to_string(),
+            file_path: None,
             file_size: 2_500_000_000,
             duration: 8800.0,
             container_format: "MKV".to_string(),
@@ -2049,11 +2104,14 @@ mod tests {
             sha256: None,
         };
 
-        let (compat1, _) = check_movie_compatibility(&host_movie, &compatible_local);
+        let (compat1, _) = check_movie_compatibility(&host_movie, &compatible_local, false);
         assert!(compat1, "Identical movie name & size must pass verification");
 
-        let (compat2, _) = check_movie_compatibility(&host_movie, &incompatible_local);
+        let (compat2, _) = check_movie_compatibility(&host_movie, &incompatible_local, false);
         assert!(!compat2, "Different movie must fail verification with warning");
+
+        let (compat3, _) = check_movie_compatibility(&host_movie, &incompatible_local, true);
+        assert!(compat3, "Compatibility approved must pass verification");
     }
 
     #[test]
