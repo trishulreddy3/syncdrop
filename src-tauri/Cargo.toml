@@ -1,0 +1,36 @@
+[package]
+name = "syncdrop"
+version = "0.1.0"
+description = "SyncDrop LAN File Transfer and Synchronized Watch Party"
+authors = ["SyncDrop Team"]
+edition = "2021"
+
+[lib]
+name = "syncdrop_lib"
+crate-type = ["staticlib", "cdylib", "rlib"]
+
+[[bin]]
+name = "syncdrop"
+path = "src/main.rs"
+
+[build-dependencies]
+tauri-build = { version = "2", features = [] }
+
+[dependencies]
+tauri = { version = "2", features = [] }
+tauri-plugin-shell = "2"
+tauri-plugin-dialog = "2"
+tauri-plugin-fs = "2"
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+tokio = { version = "1", features = ["full"] }
+network-interface = "2.0.5"
+uuid = { version = "1.29.3", features = ["v4"] }
+socket2 = "0.6.5"
+axum = { version = "0.7", features = ["ws"] }
+reqwest = { version = "0.12", default-features = false, features = ["json", "stream"] }
+tokio-util = { version = "0.7", features = ["io"] }
+futures-util = "0.3"
+tower-http = { version = "0.5", features = ["cors"] }
+tokio-tungstenite = { version = "0.21", default-features = false, features = ["connect", "handshake"] }
+sha2 = "0.10"

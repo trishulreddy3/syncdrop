@@ -1,0 +1,22 @@
+# Node dependencies
+node_modules/
+dist/
+
+# Rust build artifacts
+src-tauri/target/
+target_check/
+test_install_prod/
+
+# Sidecar raw binary (>100MB exceeds GitHub push limits; included in installer release)
+src-tauri/binaries/*.exe
+!src-tauri/binaries/.gitkeep
+
+# Logs and OS files
+*.log
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# Environment / local overrides
+.env
+.env.local
