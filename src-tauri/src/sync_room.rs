@@ -67,6 +67,8 @@ pub enum SyncMessage {
         timestamp: u64,
         sequence: u64,
         actor: String,
+        #[serde(default)]
+        permissions: Option<RoomControlPermissions>,
     },
     Seek {
         room_id: String,
@@ -755,6 +757,7 @@ impl SyncRoomManager {
                 timestamp,
                 sequence,
                 actor,
+                permissions,
             } => {
                 // 1. Reject stale synchronization messages (sequence and timestamp)
                 let last_seq = self.last_applied_sequence.load(Ordering::Relaxed);
@@ -769,6 +772,19 @@ impl SyncRoomManager {
                 }
                 self.last_applied_timestamp.store(timestamp, Ordering::SeqCst);
 
+                // Synchronize room control permissions if attached by host
+                if let Some(perms) = permissions {
+                    let mut lock = self.control_permissions.write().await;
+                    *lock = perms.clone();
+                    let is_strict = !perms.allow_all
+                        && !perms.allow_play_pause
+                        && !perms.allow_jump_forward
+                        && !perms.allow_jump_backward
+                        && !perms.allow_seek
+                        && !perms.allow_speed;
+                    self.strict_host_control.store(is_strict, Ordering::SeqCst);
+                }
+
                 // 2. Store room's intended playback speed (kept separate from drift speed)
                 self.intended_speed.store(speed.to_bits(), Ordering::SeqCst);
 
@@ -778,8 +794,9 @@ impl SyncRoomManager {
                 }
 
                 // 3. Account for network message delay and estimate expected host position
+                // Clamp latency to realistic LAN transit [0, 100ms] to avoid system clock skew inflation
                 let now = now_ms();
-                let latency_secs = (now.saturating_sub(timestamp) as f64) / 1000.0;
+                let latency_secs = ((now.saturating_sub(timestamp) as f64) / 1000.0).clamp(0.0, 0.1);
                 let expected_position = if paused {
                     position
                 } else {
@@ -821,61 +838,64 @@ impl SyncRoomManager {
                     "In Sync".to_string()
                 };
 
-                // 7. Apply Drift Correction Policy (Section 3.4 & Phase 7)
+                // 7. Apply Drift Correction Policy with Audio Pitch & Filter Protection
                 if movie_matched && !paused {
                     let abs_drift = drift.abs();
 
-                    if abs_drift > 1.5 {
-                        // DRIFT ABOVE 1.5 SECONDS:
-                        // Seek/snap to the expected host playback position (avoid seek loops with debounce)
+                    if abs_drift > 3.5 {
+                        // DRIFT ABOVE 3.5 SECONDS (Major desync or manual jump):
+                        // Snap/seek to the expected host playback position with a 4.0s debounce
                         let can_seek = {
                             let last_seek = self.last_seek_time.read().await;
-                            last_seek.elapsed() >= Duration::from_millis(1500)
+                            last_seek.elapsed() >= Duration::from_millis(4000)
                         };
 
                         if can_seek {
                             println!(
-                                "Drift > 1.5s (drift={:.2}s). Snapping to host expected position: {:.2}s",
+                                "Drift > 3.5s (drift={:.2}s). Snapping to host expected position: {:.2}s",
                                 drift, expected_position
                             );
                             let _ = self.mpv_controller.seek(expected_position, true).await;
-                            // Restore intended playback speed
-                            let _ = self.mpv_controller.set_speed(speed).await;
+                            if (mpv_st.speed - speed).abs() > 0.005 {
+                                let _ = self.mpv_controller.set_speed(speed).await;
+                            }
                             let mut last_seek = self.last_seek_time.write().await;
                             *last_seek = Instant::now();
                         }
                         sync_status = "Snapping to Host".to_string();
-                    } else if abs_drift >= 0.3 {
-                        // DRIFT BETWEEN 0.3 AND 1.5 SECONDS:
-                        // Gently adjust playback speed between 0.95x and 1.05x
-                        let correction_multiplier = if drift < -0.3 {
-                            // Local is behind host: gently speed up
-                            1.05
+                    } else if abs_drift >= 0.6 {
+                        // DRIFT BETWEEN 0.6 AND 3.5 SECONDS:
+                        // Ultra-gentle 1.5% tempo adjustment (smooth, inaudible pitch variation)
+                        let correction_multiplier = if drift < -0.6 {
+                            // Local is behind host: gently catch up
+                            1.015
                         } else {
                             // Local is ahead of host: gently slow down
-                            0.95
+                            0.985
                         };
                         let adjusted_speed = (speed * correction_multiplier).clamp(0.5, 2.0);
-                        let _ = self.mpv_controller.set_speed(adjusted_speed).await;
+                        // CRITICAL: Only send set_speed if not already at target speed to avoid resetting mpv audio filters
+                        if (mpv_st.speed - adjusted_speed).abs() > 0.005 {
+                            let _ = self.mpv_controller.set_speed(adjusted_speed).await;
+                        }
                         sync_status = format!("Speed Syncing ({:.2}x)", adjusted_speed);
                     } else {
-                        // DRIFT BELOW 0.3 SECONDS:
-                        // Do not correct. Restore normal room playback speed!
-                        if (mpv_st.speed - speed).abs() > 0.01 {
+                        // DRIFT BELOW 0.6 SECONDS (Deadband):
+                        // In natural sync. Restore normal room speed once if not already active.
+                        if (mpv_st.speed - speed).abs() > 0.005 {
                             let _ = self.mpv_controller.set_speed(speed).await;
                         }
-                        sync_status = "In Sync (< 0.3s)".to_string();
+                        sync_status = "In Sync (< 0.6s)".to_string();
                     }
                 } else if paused {
                     // Paused playback: restore normal room playback speed
-                    if (mpv_st.speed - speed).abs() > 0.01 {
+                    if (mpv_st.speed - speed).abs() > 0.005 {
                         let _ = self.mpv_controller.set_speed(speed).await;
                     }
-                    // If drift while paused is noticeable, align position
-                    if movie_matched && drift.abs() > 0.5 {
+                    if (local_pos - position).abs() > 1.5 {
                         let can_seek = {
                             let last_seek = self.last_seek_time.read().await;
-                            last_seek.elapsed() >= Duration::from_millis(1500)
+                            last_seek.elapsed() >= Duration::from_millis(3000)
                         };
                         if can_seek {
                             let _ = self.mpv_controller.seek(position, true).await;
@@ -1073,7 +1093,7 @@ impl SyncRoomManager {
 
                 // 9. Update UI state
                 self.emit_event(
-                    "syncdrop://room-state-updated",
+                    "syncdrop://room-state-sync",
                     WatchRoomState {
                         room_id: room_id.clone(),
                         movie_id: movie_id.clone(),
@@ -1192,7 +1212,7 @@ impl SyncRoomManager {
             }
             drop(perms);
 
-            if mpv_st.engine_status == "uninitialized" || mpv_st.engine_status == "loading" {
+            if mpv_st.engine_status == "loading" {
                 return Err("Player is still loading the movie. Please wait for synchronization.".to_string());
             }
             let room_id = self.room_id.read().await.clone().unwrap_or_default();
@@ -1313,6 +1333,7 @@ impl SyncRoomManager {
         let timestamp = now_ms();
 
         self.intended_speed.store(speed.to_bits(), Ordering::SeqCst);
+        let cur_perms = self.control_permissions.read().await.clone();
 
         let msg = SyncMessage::StateSync {
             room_id: room_id.clone(),
@@ -1322,6 +1343,7 @@ impl SyncRoomManager {
             timestamp,
             sequence: seq,
             actor: actor.clone(),
+            permissions: Some(cur_perms.clone()),
         };
 
         // Broadcast over WebSocket channel to all connected clients
@@ -1750,6 +1772,14 @@ async fn handle_host_socket(
                             };
                             let _ = manager.host_broadcast_tx.send(fi_msg);
                         }
+
+                        // Send active control permissions to the newly joined client
+                        let cur_perms = manager.control_permissions.read().await.clone();
+                        let room_id = manager.room_id.read().await.clone().unwrap_or_default();
+                        let _ = manager.host_broadcast_tx.send(SyncMessage::PermissionsUpdate {
+                            room_id,
+                            permissions: cur_perms,
+                        });
 
                         manager.broadcast_member_list().await;
                     }

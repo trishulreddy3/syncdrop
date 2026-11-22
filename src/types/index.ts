@@ -228,3 +228,22 @@ export interface SystemInfo {
   platform: string;
   offline_mode: boolean;
 }
+
+export interface UpdateInfo {
+  available: boolean;
+  currentVersion: string;
+  latestVersion: string;
+  releaseName: string;
+  releaseNotes: string;
+  downloadUrl?: string;
+  fileSize?: number;
+  releasePageUrl: string;
+}
+
+export interface UpdateProgress {
+  bytesDownloaded: number;
+  totalBytes: number;
+  percentage: number;
+  status: "downloading" | "installing" | "completed" | "error";
+  errorMessage?: string;
+}

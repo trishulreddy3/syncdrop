@@ -440,3 +440,28 @@ export async function onRoomDisconnected(
     callback();
   });
 }
+
+// ==========================================
+// 6. In-App Auto-Update Commands & Listeners
+// ==========================================
+
+export async function checkForUpdates(): Promise<import("../types").UpdateInfo> {
+  return await invoke<import("../types").UpdateInfo>("check_for_updates");
+}
+
+export async function downloadAndInstallUpdate(
+  downloadUrl: string
+): Promise<string> {
+  return await invoke<string>("download_and_install_update", { downloadUrl });
+}
+
+export async function onUpdateProgress(
+  callback: (progress: import("../types").UpdateProgress) => void
+): Promise<UnlistenFn> {
+  return await listen<import("../types").UpdateProgress>(
+    "syncdrop://update-progress",
+    (event) => {
+      callback(event.payload);
+    }
+  );
+}

@@ -12,8 +12,10 @@ import {
   X,
   Share2,
   Activity,
+  Sparkles,
+  Download,
 } from "lucide-react";
-import type { ActiveTab } from "../types";
+import type { ActiveTab, UpdateInfo } from "../types";
 
 interface TopBarProps {
   activeTab: ActiveTab;
@@ -25,6 +27,10 @@ interface TopBarProps {
   onSimulateIncoming?: () => void;
   onOpenSettings?: () => void;
   isDemoMode?: boolean;
+  availableUpdate?: UpdateInfo | null;
+  onOpenUpdateModal?: () => void;
+  onCheckUpdates?: () => void;
+  isCheckingUpdates?: boolean;
 }
 
 export const TopBar: React.FC<TopBarProps> = ({
@@ -37,6 +43,10 @@ export const TopBar: React.FC<TopBarProps> = ({
   onSimulateIncoming,
   onOpenSettings,
   isDemoMode = false,
+  availableUpdate,
+  onOpenUpdateModal,
+  onCheckUpdates,
+  isCheckingUpdates = false,
 }) => {
   const [isEditingNickname, setIsEditingNickname] = useState(false);
   const [tempNickname, setTempNickname] = useState(nickname);
@@ -64,6 +74,27 @@ export const TopBar: React.FC<TopBarProps> = ({
           <span className="font-semibold text-slate-700 tracking-tight">LOCAL SERVICE ACTIVE</span>
           <span className="text-slate-300">|</span>
           <span className="text-slate-500 font-mono text-[11px]">v0.1.0-win64</span>
+          {availableUpdate ? (
+            <button
+              onClick={onOpenUpdateModal}
+              className="ml-1.5 flex items-center gap-1.5 bg-gradient-to-r from-amber-500 via-orange-500 to-amber-600 hover:from-amber-600 hover:to-orange-700 text-white font-bold px-2.5 py-0.5 rounded-full text-[10px] shadow-xs animate-pulse transition active:scale-95 cursor-pointer"
+              title="Click to download and install new update"
+            >
+              <Sparkles className="w-3 h-3 text-yellow-100" />
+              <span>New Update: v{availableUpdate.latestVersion}</span>
+            </button>
+          ) : (
+            onCheckUpdates && (
+              <button
+                onClick={onCheckUpdates}
+                disabled={isCheckingUpdates}
+                className="ml-1.5 text-[10px] text-slate-400 hover:text-blue-600 hover:underline transition cursor-pointer"
+                title="Check for software updates"
+              >
+                {isCheckingUpdates ? "Checking..." : "Check for updates"}
+              </button>
+            )
+          )}
           {isDemoMode && (
             <span className="ml-2 text-[10px] font-semibold bg-amber-100 text-amber-800 px-1.5 py-0.2 rounded border border-amber-300">
               Demo Preview Mode
@@ -218,7 +249,17 @@ export const TopBar: React.FC<TopBarProps> = ({
         </div>
 
         {/* Right Info & Settings */}
-        <div className="flex items-center gap-4 text-slate-500 text-[11px]">
+        <div className="flex items-center gap-3 text-slate-500 text-[11px]">
+          {availableUpdate && (
+            <button
+              onClick={onOpenUpdateModal}
+              className="flex items-center gap-1.5 bg-blue-600 hover:bg-blue-700 text-white px-2.5 py-1 rounded-lg text-[11px] font-semibold shadow-2xs transition active:scale-95 cursor-pointer"
+              title="Open update download window"
+            >
+              <Download className="w-3.5 h-3.5" />
+              <span>Install v{availableUpdate.latestVersion}</span>
+            </button>
+          )}
           <span className="hidden md:inline font-mono text-[10px]">UDP Discovery: 224.0.0.167:53317</span>
           <span className="hidden md:inline font-mono text-[10px]">WS Sync: :53318</span>
           <button

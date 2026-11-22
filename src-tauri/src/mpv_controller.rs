@@ -229,6 +229,10 @@ impl MpvController {
             .arg("--pause=yes")
             .arg("--hr-seek=yes")
             .arg("--hr-seek-framedrop=no")
+            .arg("--audio-pitch-correction=yes")
+            .arg("--audio-buffer=0.5")
+            .arg("--audio-stream-silence=yes")
+            .arg("--video-sync=audio")
             .arg("--title=SyncDrop Movie Player")
             .arg("--autofit=75%")
             .arg("--geometry=50%:50%");

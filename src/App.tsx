@@ -3,6 +3,7 @@ import { TopBar } from "./components/TopBar";
 import { WifiSendTab } from "./components/WifiSendTab";
 import { WatchPartyTab } from "./components/WatchPartyTab";
 import { TransferPromptModal } from "./components/TransferPromptModal";
+import { UpdateModal } from "./components/UpdateModal";
 import {
   getSystemInfo,
   getLocalDeviceInfo,
@@ -45,6 +46,7 @@ import {
   onDiscoveredRoomsUpdated,
   onRoomDisconnected,
   setRoomPermissions,
+  checkForUpdates,
 } from "./lib/tauriEvents";
 import type {
   ActiveTab,
@@ -58,6 +60,7 @@ import type {
   MpvPlaybackStatus,
   WatchRoomState,
   RoomControlPermissions,
+  UpdateInfo,
 } from "./types";
 
 export function App() {
@@ -97,12 +100,26 @@ export function App() {
   const [members, setMembers] = useState<RoomMember[]>([]);
   const [discoveredRooms, setDiscoveredRooms] = useState<DiscoveredRoom[]>([]);
 
+  // In-App Update State
+  const [availableUpdate, setAvailableUpdate] = useState<UpdateInfo | null>(null);
+  const [showUpdateModal, setShowUpdateModal] = useState(false);
+  const [isCheckingUpdates, setIsCheckingUpdates] = useState(false);
+
   // Initialize native LAN discovery & fetch local device info
   useEffect(() => {
     // 1. Probe system info
     getSystemInfo()
       .then((info) => console.log("SyncDrop Core System:", info))
       .catch(console.warn);
+
+    // Check for software updates in background
+    checkForUpdates()
+      .then((info) => {
+        if (info.available) {
+          setAvailableUpdate(info);
+        }
+      })
+      .catch(() => {});
 
     // 2. Fetch dynamic physical IP & local device info
     getLocalDeviceInfo()
@@ -541,6 +558,29 @@ export function App() {
     }
   };
 
+  const handleCheckUpdates = async () => {
+    setIsCheckingUpdates(true);
+    try {
+      const info = await checkForUpdates();
+      if (info.available) {
+        setAvailableUpdate(info);
+        setShowUpdateModal(true);
+      } else {
+        alert(
+          `You are already running the latest version of SyncDrop (v${info.currentVersion})!`
+        );
+      }
+    } catch (err: any) {
+      alert(
+        typeof err === "string"
+          ? err
+          : "Could not connect to update server. Please check your internet connection."
+      );
+    } finally {
+      setIsCheckingUpdates(false);
+    }
+  };
+
   return (
     <div className="w-screen h-screen flex flex-col bg-slate-50 overflow-hidden font-sans">
       {/* Top Header & Navigation Bar */}
@@ -551,8 +591,12 @@ export function App() {
         onNicknameChange={handleNicknameChange}
         localIp={localIp}
         onlinePeerCount={peers.filter((p) => !p.isStale).length}
-        onOpenSettings={() => console.log("Settings opened")}
+        onOpenSettings={handleCheckUpdates}
         isDemoMode={false}
+        availableUpdate={availableUpdate}
+        onOpenUpdateModal={() => setShowUpdateModal(true)}
+        onCheckUpdates={handleCheckUpdates}
+        isCheckingUpdates={isCheckingUpdates}
       />
 
       {/* Main Tab Content */}
@@ -611,6 +655,14 @@ export function App() {
           prompt={incomingPrompt}
           onAccept={handleAcceptTransfer}
           onDecline={handleDeclineTransfer}
+        />
+      )}
+
+      {/* In-App Auto-Update & Installer Modal */}
+      {showUpdateModal && availableUpdate && (
+        <UpdateModal
+          updateInfo={availableUpdate}
+          onClose={() => setShowUpdateModal(false)}
         />
       )}
     </div>

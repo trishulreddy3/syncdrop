@@ -3,6 +3,7 @@ pub mod media_metadata;
 pub mod mpv_controller;
 pub mod sync_room;
 pub mod transfer;
+pub mod updater;
 
 use discovery::{DiscoveryState, LocalDeviceInfo, PeerDevice, DISCOVERY_PORT};
 use mpv_controller::{MpvController, MpvPlaybackStatus};
@@ -506,6 +507,20 @@ async fn set_compatibility_mode(
     ))
 }
 
+#[tauri::command]
+async fn check_for_updates() -> Result<updater::UpdateInfo, String> {
+    updater::check_for_updates().await
+}
+
+#[tauri::command]
+async fn download_and_install_update(
+    app: AppHandle,
+    download_url: String,
+) -> Result<String, String> {
+    let path = updater::download_and_install_update(app, download_url).await?;
+    Ok(path.to_string_lossy().to_string())
+}
+
 #[cfg_attr(mobile, tauri::mobile_entry_point)]
 pub fn run() {
     let discovery_state = Arc::new(DiscoveryState::new(DISCOVERY_PORT));
@@ -614,6 +629,8 @@ pub fn run() {
             inspect_movie_file,
             get_movie_verification,
             set_compatibility_mode,
+            check_for_updates,
+            download_and_install_update,
         ])
         .run(tauri::generate_context!())
         .expect("error while running SyncDrop desktop application");
