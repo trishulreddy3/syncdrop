@@ -123,7 +123,12 @@ if ($LASTEXITCODE -ne 0) {
 
 # 8. Create or update the GitHub Release using gh CLI
 Write-Host "`nPublishing release '$tag' to GitHub..." -ForegroundColor Yellow
-gh release create $tag $installerPath --title $Title --notes $Notes --clobber
+
+gh release create $tag $installerPath --title $Title --notes $Notes
+if ($LASTEXITCODE -ne 0) {
+    Write-Host "Release '$tag' already exists, updating asset with --clobber..." -ForegroundColor Yellow
+    gh release upload $tag $installerPath --clobber
+}
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "`n=======================================================" -ForegroundColor Green
