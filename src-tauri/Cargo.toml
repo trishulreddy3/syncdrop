@@ -1,6 +1,6 @@
 [package]
 name = "syncdrop"
-version = "0.1.0"
+version = "0.1.1"
 description = "SyncDrop LAN File Transfer and Synchronized Watch Party"
 authors = ["SyncDrop Team"]
 edition = "2021"
