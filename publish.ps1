@@ -1,7 +1,7 @@
 param (
-    [string]$Version = "0.1.0",
-    [string]$Title = "SyncDrop v0.1.0",
-    [string]$Notes = "Official production release of SyncDrop: LAN file transfer, synchronized watch rooms, and offline Windows setup.",
+    [string]$Version = "",
+    [string]$Title = "",
+    [string]$Notes = "Official production release of SyncDrop with automated LAN sync, audio pitch protection, and in-app updater system.",
     [switch]$SkipBuild = $false
 )
 
@@ -9,13 +9,26 @@ $ErrorActionPreference = "Stop"
 
 Write-Host "`n=== SyncDrop Terminal Release Publisher ===" -ForegroundColor Cyan
 
-# 1. Check if gh CLI is available
+# 1. Determine release version
+if (-not $Version) {
+    $pkgJson = Get-Content "package.json" -Raw | ConvertFrom-Json
+    $Version = $pkgJson.version
+}
+$Version = $Version.Trim().TrimStart('v')
+
+if (-not $Title) {
+    $Title = "SyncDrop v$Version"
+}
+
+Write-Host "Target Release Version: v$Version" -ForegroundColor Green
+
+# 2. Check if gh CLI is available
 if (-not (Get-Command gh -ErrorAction SilentlyContinue)) {
     Write-Error "GitHub CLI ('gh') is not installed. Please install it with: winget install GitHub.cli"
     exit 1
 }
 
-# 2. Check GitHub CLI authentication
+# 3. Check GitHub CLI authentication
 Write-Host "Checking GitHub authentication..." -ForegroundColor Yellow
 $authCheck = gh auth status 2>&1
 if ($LASTEXITCODE -ne 0) {
@@ -29,10 +42,30 @@ if ($LASTEXITCODE -ne 0) {
 }
 Write-Host "GitHub CLI authenticated successfully.`n" -ForegroundColor Green
 
-$installerPath = "release\SyncDrop_${Version}_x64-setup.exe"
-$buildArtifact = "src-tauri\target\release\bundle\nsis\SyncDrop_${Version}_x64-setup.exe"
+# 4. Sync version across project configuration files
+Write-Host "Updating project configuration files to version $Version..." -ForegroundColor Yellow
 
-# 3. Build application if not skipped
+# Update package.json
+(Get-Content "package.json") -replace '"version":\s*"[^"]+"', ('"version": "' + $Version + '"') | Set-Content "package.json"
+
+# Update src-tauri/tauri.conf.json
+(Get-Content "src-tauri\tauri.conf.json") -replace '"version":\s*"[^"]+"', ('"version": "' + $Version + '"') | Set-Content "src-tauri\tauri.conf.json"
+
+# Update src-tauri/Cargo.toml (first package version)
+$cargoContent = Get-Content "src-tauri\Cargo.toml"
+$updatedCargo = @()
+$foundPackageVersion = $false
+foreach ($line in $cargoContent) {
+    if (-not $foundPackageVersion -and $line -match '^version\s*=\s*"[^"]+"') {
+        $updatedCargo += ('version = "' + $Version + '"')
+        $foundPackageVersion = $true
+    } else {
+        $updatedCargo += $line
+    }
+}
+$updatedCargo | Set-Content "src-tauri\Cargo.toml"
+
+# 5. Build application if not skipped
 if (-not $SkipBuild) {
     Write-Host "Building production installer (npm run tauri build)..." -ForegroundColor Yellow
     npm run tauri build
@@ -40,34 +73,41 @@ if (-not $SkipBuild) {
         Write-Error "Tauri build failed."
         exit 1
     }
-
-    if (Test-Path $buildArtifact) {
-        if (-not (Test-Path "release")) {
-            New-Item -ItemType Directory -Path "release" -Force | Out-Null
-        }
-        Copy-Item -Path $buildArtifact -Destination $installerPath -Force
-        Write-Host "Copied installer to: $installerPath" -ForegroundColor Green
-    } else {
-        Write-Error "Build finished but could not locate: $buildArtifact"
-        exit 1
-    }
 } else {
     Write-Host "Skipping build as requested (-SkipBuild)." -ForegroundColor Yellow
-    if (-not (Test-Path $installerPath)) {
-        if (Test-Path $buildArtifact) {
-            Copy-Item -Path $buildArtifact -Destination $installerPath -Force
-        } else {
-            Write-Error "Installer not found at $installerPath. Run without -SkipBuild."
-            exit 1
-        }
-    }
 }
+
+# Locate the generated NSIS installer dynamically
+$builtExe = Get-ChildItem "src-tauri\target\release\bundle\nsis\*.exe" -ErrorAction SilentlyContinue |
+    Sort-Object LastWriteTime -Descending |
+    Select-Object -First 1
+
+if (-not $builtExe) {
+    Write-Error "Could not find any generated NSIS setup executable in src-tauri\target\release\bundle\nsis\"
+    exit 1
+}
+
+if (-not (Test-Path "release")) {
+    New-Item -ItemType Directory -Path "release" -Force | Out-Null
+}
+
+$installerPath = "release\SyncDrop_${Version}_x64-setup.exe"
+Copy-Item -Path $builtExe.FullName -Destination $installerPath -Force
+Write-Host "Installer ready at: $installerPath" -ForegroundColor Green
 
 $fileItem = Get-Item $installerPath
 $fileSizeMb = [math]::Round($fileItem.Length / 1MB, 2)
-Write-Host "Ready to publish: $($fileItem.Name) ($fileSizeMb MB)" -ForegroundColor Green
+Write-Host "File size: $($fileItem.Name) ($fileSizeMb MB)" -ForegroundColor Green
 
-# 4. Push git commits & tags
+# 6. Commit version bump if configuration files changed
+$status = git status --porcelain package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+if ($status) {
+    Write-Host "`nCommitting version bump to Git..." -ForegroundColor Yellow
+    git add package.json src-tauri/tauri.conf.json src-tauri/Cargo.toml
+    git commit -m "chore(release): bump version to $Version"
+}
+
+# 7. Push git commits & tags
 Write-Host "`nSyncing Git commits & tags with GitHub..." -ForegroundColor Yellow
 $tag = "v$Version"
 $existingTag = git tag -l $tag
@@ -81,14 +121,15 @@ if ($LASTEXITCODE -ne 0) {
     Write-Host "Warning: git push returned non-zero code. Continuing to release upload..." -ForegroundColor DarkYellow
 }
 
-# 5. Create or update the GitHub Release using gh CLI
+# 8. Create or update the GitHub Release using gh CLI
 Write-Host "`nPublishing release '$tag' to GitHub..." -ForegroundColor Yellow
 gh release create $tag $installerPath --title $Title --notes $Notes --clobber
 
 if ($LASTEXITCODE -eq 0) {
     Write-Host "`n=======================================================" -ForegroundColor Green
     Write-Host " SUCCESS: Release $tag published successfully to GitHub!" -ForegroundColor Green
-    Write-Host " View your release at: https://github.com/trishulreddy3/syncdrop/releases/tag/$tag" -ForegroundColor Cyan
+    Write-Host " Download URL: https://github.com/trishulreddy3/syncdrop/releases/tag/$tag" -ForegroundColor Cyan
+    Write-Host " Users will now receive the update directly in their app UI!" -ForegroundColor Green
     Write-Host "=======================================================`n" -ForegroundColor Green
 } else {
     Write-Error "gh release create failed."
