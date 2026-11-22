@@ -18,9 +18,11 @@ import {
   Clock,
   HardDrive,
   FolderCog,
+  File,
+  Folder,
 } from "lucide-react";
 import type { PeerDevice, StagedFile, ActiveTransfer } from "../types";
-import { pickFilesNative, resolveStagedFiles } from "../lib/tauriEvents";
+import { pickFilesNative, pickFolderNative, resolveStagedFiles } from "../lib/tauriEvents";
 
 interface WifiSendTabProps {
   peers: PeerDevice[];
@@ -83,19 +85,36 @@ export const WifiSendTab: React.FC<WifiSendTabProps> = ({
 
   const handleBrowseFilesClick = async () => {
     try {
-      // First try native Windows file picker dialog
-      const selectedPaths = await pickFilesNative();
+      // First try native Windows file picker dialog starting in download/movies folder
+      const selectedPaths = await pickFilesNative(downloadDir);
       if (selectedPaths && selectedPaths.length > 0) {
         const resolved = await resolveStagedFiles(selectedPaths);
         onAddFiles(resolved);
         return;
       }
-    } catch {
-      // Fallback to web input if native dialog is unavailable
+    } catch (err) {
+      console.warn("Native file picker failed:", err);
     }
 
     if (fileInputRef.current) {
       fileInputRef.current.click();
+    }
+  };
+
+  const handleBrowseFolderClick = async () => {
+    try {
+      // Opens folder picker to attach all files in a folder
+      const selectedFolder = await pickFolderNative(downloadDir);
+      if (selectedFolder) {
+        const resolved = await resolveStagedFiles([selectedFolder]);
+        if (resolved.length > 0) {
+          onAddFiles(resolved);
+        } else {
+          alert("The selected folder does not contain any readable files.");
+        }
+      }
+    } catch (err) {
+      console.warn("Folder picker failed:", err);
     }
   };
 
@@ -404,12 +423,22 @@ export const WifiSendTab: React.FC<WifiSendTabProps> = ({
                 Movies, documents, folders, or archives. Supports multi-gigabyte files streamed
                 directly without cloud relays.
               </p>
-              <button
-                onClick={handleBrowseFilesClick}
-                className="mt-4 px-4 py-2 bg-white border border-slate-200 hover:bg-slate-100 rounded-xl text-xs font-semibold text-slate-700 shadow-2xs transition active:scale-95"
-              >
-                Browse Files
-              </button>
+              <div className="flex items-center gap-2 mt-4">
+                <button
+                  onClick={handleBrowseFilesClick}
+                  className="px-3.5 py-2 bg-white border border-slate-200 hover:bg-slate-100 rounded-xl text-xs font-semibold text-slate-700 shadow-2xs transition active:scale-95 flex items-center gap-1.5"
+                >
+                  <File className="w-3.5 h-3.5 text-blue-600" />
+                  <span>Browse Files</span>
+                </button>
+                <button
+                  onClick={handleBrowseFolderClick}
+                  className="px-3.5 py-2 bg-white border border-slate-200 hover:bg-slate-100 rounded-xl text-xs font-semibold text-slate-700 shadow-2xs transition active:scale-95 flex items-center gap-1.5"
+                >
+                  <Folder className="w-3.5 h-3.5 text-amber-500" />
+                  <span>Browse Folder</span>
+                </button>
+              </div>
             </div>
 
             {/* Staged Files List */}

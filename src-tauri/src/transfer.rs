@@ -696,7 +696,38 @@ pub async fn start_transfer_http_server(
 // Outgoing Transfer Engine (Sender Side)
 // ==========================================
 
-/// Resolves real file information from disk paths
+/// Recursively collects all files from a directory into a staged files list
+fn collect_files_recursive(dir: &Path, results: &mut Vec<StagedFileInfo>) -> Result<(), String> {
+    let entries = match std::fs::read_dir(dir) {
+        Ok(e) => e,
+        Err(err) => return Err(format!("Could not read directory {}: {}", dir.display(), err)),
+    };
+
+    for entry in entries {
+        let entry = entry.map_err(|e| format!("Error reading directory entry: {}", e))?;
+        let path = entry.path();
+        if path.is_dir() {
+            collect_files_recursive(&path, results)?;
+        } else if path.is_file() {
+            let meta = std::fs::metadata(&path)
+                .map_err(|e| format!("Could not read file metadata for {}: {}", path.display(), e))?;
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+            results.push(StagedFileInfo {
+                id: Uuid::new_v4().to_string(),
+                name,
+                size: meta.len(),
+                path: path.to_string_lossy().to_string(),
+            });
+        }
+    }
+    Ok(())
+}
+
+/// Resolves real file information from disk paths, expanding folders recursively
 pub fn resolve_staged_files(paths: Vec<String>) -> Result<Vec<StagedFileInfo>, String> {
     let mut files = Vec::new();
     for p in paths {
@@ -704,23 +735,93 @@ pub fn resolve_staged_files(paths: Vec<String>) -> Result<Vec<StagedFileInfo>, S
         if !path.exists() {
             return Err(format!("File does not exist: {}", p));
         }
-        let meta = std::fs::metadata(&path)
-            .map_err(|e| format!("Could not read file metadata for {}: {}", p, e))?;
 
-        let name = path
-            .file_name()
-            .and_then(|n| n.to_str())
-            .unwrap_or("unknown")
-            .to_string();
+        if path.is_dir() {
+            collect_files_recursive(&path, &mut files)?;
+        } else {
+            let meta = std::fs::metadata(&path)
+                .map_err(|e| format!("Could not read file metadata for {}: {}", p, e))?;
 
-        files.push(StagedFileInfo {
-            id: Uuid::new_v4().to_string(),
-            name,
-            size: meta.len(),
-            path: p,
-        });
+            let name = path
+                .file_name()
+                .and_then(|n| n.to_str())
+                .unwrap_or("unknown")
+                .to_string();
+
+            files.push(StagedFileInfo {
+                id: Uuid::new_v4().to_string(),
+                name,
+                size: meta.len(),
+                path: p,
+            });
+        }
     }
     Ok(files)
+}
+
+/// Scans a directory on disk and returns all files found inside
+pub fn scan_directory_files(dir_path: &Path) -> Result<Vec<StagedFileInfo>, String> {
+    if !dir_path.exists() {
+        return Ok(Vec::new());
+    }
+    let mut files = Vec::new();
+    if dir_path.is_dir() {
+        collect_files_recursive(dir_path, &mut files)?;
+    }
+    Ok(files)
+}
+
+/// Detects if a movie file is already present on the local laptop in common download/movie locations
+pub fn detect_local_movie(filename: &str, expected_size: u64, download_dir: &str) -> Option<String> {
+    let mut candidates = Vec::new();
+
+    // 1. Configured download directory
+    candidates.push(PathBuf::from(download_dir));
+
+    // 2. Standard Windows user directories
+    if let Ok(user_profile) = std::env::var("USERPROFILE") {
+        let base = PathBuf::from(&user_profile);
+        candidates.push(base.join("Downloads"));
+        candidates.push(base.join("Downloads").join("SyncDrop"));
+        candidates.push(base.join("Videos"));
+        candidates.push(base.join("Movies"));
+    }
+
+    let target_name_lower = filename.to_lowercase();
+
+    for dir in candidates {
+        if !dir.exists() || !dir.is_dir() {
+            continue;
+        }
+
+        // Search directory contents for match by filename or close size
+        if let Ok(entries) = std::fs::read_dir(&dir) {
+            for entry in entries.flatten() {
+                let path = entry.path();
+                if path.is_file() {
+                    let fname = path.file_name().and_then(|n| n.to_str()).unwrap_or("");
+                    if fname.to_lowercase() == target_name_lower {
+                        return Some(path.to_string_lossy().to_string());
+                    }
+                    if expected_size > 0 {
+                        if let Ok(meta) = entry.metadata() {
+                            let size_diff = (meta.len() as i64 - expected_size as i64).abs();
+                            if size_diff < 1024 * 1024
+                                && (fname.ends_with(".mkv")
+                                    || fname.ends_with(".mp4")
+                                    || fname.ends_with(".avi")
+                                    || fname.ends_with(".webm"))
+                            {
+                                return Some(path.to_string_lossy().to_string());
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+
+    None
 }
 
 /// Dispatches direct TCP file transfers to selected recipients concurrently
@@ -1184,6 +1285,46 @@ mod tests {
         assert_eq!(path3, temp_dir.join("test_movie (2).mp4"));
 
         // Cleanup
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_resolve_staged_files_recursively_expands_folders() {
+        let temp_dir = std::env::temp_dir().join(format!("syncdrop_folder_test_{}", Uuid::new_v4()));
+        let sub_dir = temp_dir.join("subfolder");
+        std::fs::create_dir_all(&sub_dir).unwrap();
+
+        let file1 = temp_dir.join("movie1.mp4");
+        let file2 = sub_dir.join("movie2.mkv");
+        std::fs::write(&file1, b"123456").unwrap();
+        std::fs::write(&file2, b"123456789").unwrap();
+
+        let staged = resolve_staged_files(vec![temp_dir.to_string_lossy().to_string()]).unwrap();
+        assert_eq!(staged.len(), 2, "Folder must expand to its contained files");
+
+        let names: Vec<String> = staged.into_iter().map(|f| f.name).collect();
+        assert!(names.contains(&"movie1.mp4".to_string()));
+        assert!(names.contains(&"movie2.mkv".to_string()));
+
+        let _ = std::fs::remove_dir_all(&temp_dir);
+    }
+
+    #[test]
+    fn test_detect_local_movie_in_download_directory() {
+        let temp_dir = std::env::temp_dir().join(format!("syncdrop_detect_test_{}", Uuid::new_v4()));
+        std::fs::create_dir_all(&temp_dir).unwrap();
+
+        let movie_file = temp_dir.join("Avengers.Endgame.2019.mp4");
+        std::fs::write(&movie_file, b"sample bytes").unwrap();
+
+        let detected = detect_local_movie(
+            "avengers.endgame.2019.mp4",
+            12,
+            &temp_dir.to_string_lossy(),
+        );
+        assert!(detected.is_some(), "Movie must be detected case-insensitively");
+        assert_eq!(detected.unwrap(), movie_file.to_string_lossy().to_string());
+
         let _ = std::fs::remove_dir_all(&temp_dir);
     }
 }

@@ -7,7 +7,7 @@
 use sha2::{Digest, Sha256};
 use std::fs::File;
 use std::io::{BufReader, Read};
-use std::path::Path;
+use std::path::PathBuf;
 use tokio::task;
 
 use crate::sync_room::{normalize_filename, MovieFileInfo};
@@ -26,22 +26,50 @@ pub struct MovieVerificationResult {
 
 /// Inspects local movie file metadata and starts SHA-256 calculation asynchronously
 pub async fn inspect_local_movie(file_path: String) -> Result<MovieFileInfo, String> {
-    let path = Path::new(&file_path);
-    if !path.exists() || !path.is_file() {
+    let mut resolved_path = PathBuf::from(&file_path);
+    if !resolved_path.exists() {
         return Err(format!("Movie file does not exist: {}", file_path));
     }
 
-    let filename = path
+    // If a folder was selected, find the primary video file inside
+    if resolved_path.is_dir() {
+        let video_exts = ["mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "flv", "wmv", "m2ts"];
+        let mut best_candidate: Option<(PathBuf, u64)> = None;
+
+        if let Ok(entries) = std::fs::read_dir(&resolved_path) {
+            for entry in entries.flatten() {
+                let p = entry.path();
+                if p.is_file() {
+                    let ext = p.extension().and_then(|e| e.to_str()).unwrap_or("").to_lowercase();
+                    if video_exts.contains(&ext.as_str()) {
+                        let len = entry.metadata().map(|m| m.len()).unwrap_or(0);
+                        if best_candidate.as_ref().map(|(_, l)| len > *l).unwrap_or(true) {
+                            best_candidate = Some((p, len));
+                        }
+                    }
+                }
+            }
+        }
+
+        if let Some((best_path, _)) = best_candidate {
+            resolved_path = best_path;
+        } else {
+            return Err("No compatible video files found inside the selected folder".to_string());
+        }
+    }
+
+    let final_path_str = resolved_path.to_string_lossy().to_string();
+    let filename = resolved_path
         .file_name()
         .and_then(|n| n.to_str())
         .unwrap_or("movie.mp4")
         .to_string();
 
-    let file_size = std::fs::metadata(&path)
+    let file_size = std::fs::metadata(&resolved_path)
         .map(|m| m.len())
         .map_err(|e| format!("Could not read file metadata: {}", e))?;
 
-    let container_format = path
+    let container_format = resolved_path
         .extension()
         .and_then(|e| e.to_str())
         .unwrap_or("MP4")
@@ -50,7 +78,7 @@ pub async fn inspect_local_movie(file_path: String) -> Result<MovieFileInfo, Str
     let movie_id = format!("movie-{}", &uuid::Uuid::new_v4().to_string()[..8]);
 
     // Calculate SHA-256 asynchronously on a blocking worker thread pool so UI thread never freezes
-    let path_buf = path.to_path_buf();
+    let path_buf = resolved_path.clone();
     let sha256_hash = task::spawn_blocking(move || -> Result<String, String> {
         let file = File::open(&path_buf).map_err(|e| format!("Cannot open file for hashing: {}", e))?;
         let mut reader = BufReader::with_capacity(1024 * 1024, file); // 1 MB buffer
@@ -76,7 +104,7 @@ pub async fn inspect_local_movie(file_path: String) -> Result<MovieFileInfo, Str
     Ok(MovieFileInfo {
         movie_id,
         filename,
-        file_path: Some(file_path),
+        file_path: Some(final_path_str),
         file_size,
         duration: 0.0,
         container_format,

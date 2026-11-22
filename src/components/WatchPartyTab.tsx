@@ -26,6 +26,7 @@ import {
   Lock,
   Unlock,
   Shield,
+  HardDrive,
 } from "lucide-react";
 import type {
   RoomMember,
@@ -42,6 +43,7 @@ import {
   inspectMovieFile,
   getMovieVerification,
   setCompatibilityMode,
+  detectLocalMovie,
 } from "../lib/tauriEvents";
 
 interface WatchPartyTabProps {
@@ -243,10 +245,51 @@ export const WatchPartyTab: React.FC<WatchPartyTabProps> = ({
     }
   };
 
+  const hostMovie = roomState?.movieInfo;
+  const [detectedLocalPath, setDetectedLocalPath] = useState<string | null>(null);
+
+  // Auto-detect if room movie already exists on participant's laptop (Downloads, Videos, SyncDrop folder)
+  useEffect(() => {
+    if (
+      isInRoom &&
+      hostMovie &&
+      !roomState?.isHost &&
+      (!selectedMovie || verificationResult?.status === "NOT_LOADED")
+    ) {
+      detectLocalMovie(hostMovie.filename, hostMovie.fileSize)
+        .then((path) => {
+          if (path) {
+            setDetectedLocalPath(path);
+          } else {
+            setDetectedLocalPath(null);
+          }
+        })
+        .catch(() => setDetectedLocalPath(null));
+    } else {
+      setDetectedLocalPath(null);
+    }
+  }, [
+    isInRoom,
+    hostMovie?.filename,
+    hostMovie?.fileSize,
+    selectedMovie?.filename,
+    verificationResult?.status,
+  ]);
+
   const handleBrowseMovieClick = async () => {
-    const selectedPath = await pickMovieFileNative();
-    if (selectedPath) {
-      await loadAndVerifyMovie(selectedPath);
+    try {
+      const selectedPath = await pickMovieFileNative(downloadDir);
+      if (selectedPath) {
+        await loadAndVerifyMovie(selectedPath);
+      }
+    } catch (err) {
+      console.warn("Movie file picker error:", err);
+    }
+  };
+
+  const handleLoadDetectedMovie = async () => {
+    if (detectedLocalPath) {
+      await loadAndVerifyMovie(detectedLocalPath);
     }
   };
 
@@ -270,7 +313,6 @@ export const WatchPartyTab: React.FC<WatchPartyTabProps> = ({
   };
 
   // Find if any recently received incoming transfer matches the room's movie
-  const hostMovie = roomState?.movieInfo;
   const matchingTransfer = completedTransfers.find((t) => {
     if (t.direction !== "incoming" || t.status !== "completed") return false;
     if (!hostMovie) return false;
@@ -700,8 +742,34 @@ export const WatchPartyTab: React.FC<WatchPartyTabProps> = ({
                   </div>
                 )}
 
-                {/* 2. If movie is not loaded yet */}
-                {(!selectedMovie || verificationResult?.status === "NOT_LOADED") && !matchingTransfer && (
+                {/* 2. If a local copy was auto-detected on the laptop */}
+                {detectedLocalPath && !matchingTransfer && (!selectedMovie || verificationResult?.status === "NOT_LOADED") && (
+                  <div className="bg-emerald-50 border border-emerald-300 rounded-xl p-3.5 flex items-center justify-between text-xs text-emerald-900 gap-3 shadow-2xs">
+                    <div className="flex items-center gap-2.5 min-w-0">
+                      <div className="w-8 h-8 rounded-lg bg-emerald-600 text-white flex items-center justify-center flex-shrink-0">
+                        <HardDrive className="w-4 h-4" />
+                      </div>
+                      <div className="min-w-0">
+                        <p className="font-bold truncate">
+                          Local Copy Found on Laptop: {hostMovie.filename}
+                        </p>
+                        <p className="text-[11px] text-emerald-700 truncate">
+                          Located at: {detectedLocalPath}
+                        </p>
+                      </div>
+                    </div>
+                    <button
+                      onClick={handleLoadDetectedMovie}
+                      className="px-3.5 py-1.5 bg-emerald-600 hover:bg-emerald-700 text-white rounded-lg font-semibold flex items-center gap-1.5 flex-shrink-0 transition active:scale-95 shadow-2xs"
+                    >
+                      <Play className="w-3.5 h-3.5 fill-white" />
+                      <span>Load &amp; Catch Up</span>
+                    </button>
+                  </div>
+                )}
+
+                {/* 3. If movie is not loaded yet and no local copy found */}
+                {(!selectedMovie || verificationResult?.status === "NOT_LOADED") && !matchingTransfer && !detectedLocalPath && (
                   <div className="bg-amber-50 border border-amber-200 rounded-xl p-3.5 flex items-start gap-3 text-xs text-amber-900">
                     <AlertTriangle className="w-5 h-5 text-amber-600 flex-shrink-0 mt-0.5" />
                     <div className="flex-1 min-w-0">
@@ -732,7 +800,7 @@ export const WatchPartyTab: React.FC<WatchPartyTabProps> = ({
                   </div>
                 )}
 
-                {/* 3. If movie is loaded but verification failed (MISMATCH) */}
+                {/* 4. If movie is loaded but verification failed (MISMATCH) */}
                 {selectedMovie && verificationResult?.status === "MISMATCH" && (
                   <div className="bg-rose-50 border border-rose-200 rounded-xl p-3.5 flex items-start gap-3 text-xs text-rose-900">
                     <AlertTriangle className="w-5 h-5 text-rose-600 flex-shrink-0 mt-0.5" />

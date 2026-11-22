@@ -97,6 +97,88 @@ async fn resolve_staged_files(
 }
 
 #[tauri::command]
+async fn pick_files_dialog(
+    default_dir: Option<String>,
+) -> Result<Vec<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("Select Files to Send via SyncDrop");
+        if let Some(ref dir) = default_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let paths = dialog.pick_files();
+        Ok(paths
+            .unwrap_or_default()
+            .into_iter()
+            .map(|p| p.to_string_lossy().to_string())
+            .collect())
+    })
+    .await
+    .map_err(|e| format!("Dialog thread failed: {}", e))?
+}
+
+#[tauri::command]
+async fn pick_folder_dialog(
+    default_dir: Option<String>,
+) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new().set_title("Select Folder to Send via SyncDrop");
+        if let Some(ref dir) = default_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let path = dialog.pick_folder();
+        Ok(path.map(|p| p.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|e| format!("Dialog thread failed: {}", e))?
+}
+
+#[tauri::command]
+async fn pick_movie_dialog(
+    default_dir: Option<String>,
+) -> Result<Option<String>, String> {
+    tokio::task::spawn_blocking(move || {
+        let mut dialog = rfd::FileDialog::new()
+            .set_title("Select Movie File for Watch Party")
+            .add_filter(
+                "Video Files (*.mp4, *.mkv, *.avi, *.mov, *.webm, etc.)",
+                &["mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "flv", "wmv", "m2ts"],
+            )
+            .add_filter("All Files (*.*)", &["*"]);
+
+        if let Some(ref dir) = default_dir {
+            dialog = dialog.set_directory(dir);
+        }
+        let path = dialog.pick_file();
+        Ok(path.map(|p| p.to_string_lossy().to_string()))
+    })
+    .await
+    .map_err(|e| format!("Dialog thread failed: {}", e))?
+}
+
+#[tauri::command]
+async fn scan_directory(
+    path: Option<String>,
+    transfer_state: State<'_, Arc<TransferState>>,
+) -> Result<Vec<transfer::StagedFileInfo>, String> {
+    let target_dir = match path {
+        Some(p) => std::path::PathBuf::from(p),
+        None => transfer_state.download_dir.read().await.clone(),
+    };
+    transfer::scan_directory_files(&target_dir)
+}
+
+#[tauri::command]
+async fn detect_local_movie(
+    filename: String,
+    expected_size: u64,
+    transfer_state: State<'_, Arc<TransferState>>,
+) -> Result<Option<String>, String> {
+    let download_dir = transfer_state.download_dir.read().await;
+    let dir_str = download_dir.to_string_lossy().to_string();
+    Ok(transfer::detect_local_movie(&filename, expected_size, &dir_str))
+}
+
+#[tauri::command]
 async fn send_files_to_recipients(
     app: AppHandle,
     transfer_state: State<'_, Arc<TransferState>>,
@@ -493,6 +575,11 @@ pub fn run() {
             start_discovery,
             stop_discovery,
             resolve_staged_files,
+            pick_files_dialog,
+            pick_folder_dialog,
+            pick_movie_dialog,
+            scan_directory,
+            detect_local_movie,
             send_files_to_recipients,
             respond_to_transfer_prompt,
             cancel_transfer,

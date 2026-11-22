@@ -128,10 +128,18 @@ export async function openDownloadFolder(): Promise<void> {
 /**
  * Opens native Windows file dialog to select multiple files
  */
-export async function pickFilesNative(): Promise<string[] | null> {
+export async function pickFilesNative(defaultDir?: string): Promise<string[] | null> {
+  try {
+    const paths = await invoke<string[]>("pick_files_dialog", { defaultDir });
+    if (paths && paths.length > 0) return paths;
+  } catch (err) {
+    console.warn("Direct native file picker error, trying plugin fallback:", err);
+  }
+
   try {
     const selected = await open({
       multiple: true,
+      defaultPath: defaultDir,
       title: "Select Files to Send via SyncDrop",
     });
     if (!selected) return null;
@@ -143,21 +151,56 @@ export async function pickFilesNative(): Promise<string[] | null> {
 }
 
 /**
- * Opens native Windows folder picker to change download directory
+ * Opens native Windows folder picker to select a folder
  */
-export async function pickDownloadDirectoryNative(): Promise<string | null> {
+export async function pickFolderNative(defaultDir?: string): Promise<string | null> {
+  try {
+    const path = await invoke<string | null>("pick_folder_dialog", { defaultDir });
+    if (path) return path;
+  } catch (err) {
+    console.warn("Direct native folder picker error, trying plugin fallback:", err);
+  }
+
   try {
     const selected = await open({
       directory: true,
       multiple: false,
-      title: "Select SyncDrop Download Folder",
+      defaultPath: defaultDir,
+      title: "Select Folder to Send via SyncDrop",
     });
     if (!selected || Array.isArray(selected)) return null;
     return selected;
   } catch (err) {
-    console.warn("Native directory picker failed or cancelled:", err);
+    console.warn("Native folder picker failed or cancelled:", err);
     return null;
   }
+}
+
+/**
+ * Opens native Windows folder picker to change download directory
+ */
+export async function pickDownloadDirectoryNative(defaultDir?: string): Promise<string | null> {
+  return await pickFolderNative(defaultDir);
+}
+
+/**
+ * Scans a local directory on disk and returns all files found inside
+ */
+export async function scanDirectoryFiles(path?: string): Promise<StagedFile[]> {
+  return await invoke<StagedFile[]>("scan_directory", { path });
+}
+
+/**
+ * Detects if a movie file is already present on the local laptop in common download/movie locations
+ */
+export async function detectLocalMovie(
+  filename: string,
+  expectedSize: number
+): Promise<string | null> {
+  return await invoke<string | null>("detect_local_movie", {
+    filename,
+    expectedSize,
+  });
 }
 
 /**
@@ -241,15 +284,23 @@ export async function onMpvStatusChanged(
 /**
  * Opens native file picker filtered for video formats
  */
-export async function pickMovieFileNative(): Promise<string | null> {
+export async function pickMovieFileNative(defaultDir?: string): Promise<string | null> {
+  try {
+    const path = await invoke<string | null>("pick_movie_dialog", { defaultDir });
+    if (path) return path;
+  } catch (err) {
+    console.warn("Direct native movie picker error, trying plugin fallback:", err);
+  }
+
   try {
     const selected = await open({
       multiple: false,
+      defaultPath: defaultDir,
       title: "Select Movie File for Watch Party",
       filters: [
         {
           name: "Video Files (*.mp4, *.mkv, *.avi, *.mov, *.webm)",
-          extensions: ["mp4", "mkv", "avi", "mov", "webm", "m4v"],
+          extensions: ["mp4", "mkv", "avi", "mov", "webm", "m4v", "ts", "flv", "wmv", "m2ts"],
         },
         {
           name: "All Files (*.*)",
